@@ -8,18 +8,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool \
+          sudo apt-get install -y git zip unzip autoconf libtool \
             pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
             cmake libffi-dev libssl-dev
           pip install --upgrade pip buildozer "cython<3" virtualenv
@@ -28,9 +23,16 @@ jobs:
           path: .buildozer
           key: buildozer-${{ hashFiles('buildozer.spec') }}
       - name: Build
-        run: buildozer -v android debug
+        run: |
+          # Java 11 нужна старому sdkmanager (установка Android SDK),
+          # а сам Gradle ниже запускаем на Java 17
+          export JAVA_HOME="$JAVA_HOME_11_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          mkdir -p ~/.gradle
+          echo "org.gradle.java.home=$JAVA_HOME_17_X64" >> ~/.gradle/gradle.properties
+          java -version
+          buildozer -v android debug
       - uses: actions/upload-artifact@v4
         with:
           name: notesbot-apk
           path: bin/*.apk
-          
