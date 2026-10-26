@@ -16,6 +16,10 @@ def data_dir() -> str:
     return d
 
 
+def file_path(name: str) -> str:
+    return _path(name)
+
+
 def _path(name: str) -> str:
     return os.path.join(data_dir(), name)
 
@@ -36,13 +40,66 @@ def _read_json(name: str) -> dict:
         return {}
 
 
-# --- настройки: {"token": "...", "enabled": true/false} ---
+# --- настройки: {"token": "...", "enabled": true/false,
+#                  "proxy_enabled": true/false, "proxy_port": 1443, "proxy_secret": "32 hex"} ---
 def load_config() -> dict:
     return _read_json("config.json")
 
 
 def save_config(cfg: dict) -> None:
     _write_json("config.json", cfg)
+
+
+# --- локальный MTProto-прокси для Telegram ---
+PROXY_HOST = "127.0.0.1"
+PROXY_DEFAULT_PORT = 1443
+
+
+def ensure_proxy_config() -> dict:
+    """Гарантирует, что в настройках есть порт и секрет прокси (создаёт при первом запуске)."""
+    cfg = load_config()
+    changed = False
+    secret = str(cfg.get("proxy_secret", ""))
+    try:
+        bytes.fromhex(secret)
+        valid = len(secret) == 32
+    except ValueError:
+        valid = False
+    if not valid:
+        cfg["proxy_secret"] = os.urandom(16).hex()
+        changed = True
+    try:
+        port = int(cfg.get("proxy_port", 0))
+    except (TypeError, ValueError):
+        port = 0
+    if not 1024 <= port <= 65535:
+        cfg["proxy_port"] = PROXY_DEFAULT_PORT
+        changed = True
+    if changed:
+        save_config(cfg)
+    return cfg
+
+
+def proxy_link(cfg: dict) -> str:
+    """Ссылка для Telegram: tg://proxy?... (секрет с префиксом dd)."""
+    return (f"tg://proxy?server={PROXY_HOST}&port={cfg['proxy_port']}"
+            f"&secret=dd{cfg['proxy_secret']}")
+
+
+# --- статус прокси: {"state": "running|starting|error", "msg": "...", "ts": ...} ---
+def write_proxy_status(state: str, **extra) -> None:
+    _write_json("proxy_status.json", {"state": state, "ts": time.time(), **extra})
+
+
+def read_proxy_status() -> dict:
+    return _read_json("proxy_status.json")
+
+
+def clear_proxy_status() -> None:
+    try:
+        os.remove(_path("proxy_status.json"))
+    except OSError:
+        pass
 
 
 # --- статус сервиса: {"state": "running|starting|error", "bot": "...", "msg": "...", "ts": ...} ---
