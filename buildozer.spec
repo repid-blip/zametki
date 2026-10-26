@@ -9,10 +9,14 @@ orientation = portrait
 requirements = python3,kivy,certifi,pyjnius,android,sqlite3,openssl
 services = botservice:service.py:foreground
 android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,WAKE_LOCK
-android.api = 34
+android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a
 android.accept_sdk_license = True
+
+# Стабильная версия python-for-android (Python 3.11).
+# Без этой строки берётся свежая develop-ветка с Python 3.14, и сборка падает.
+p4a.branch = v2024.01.21
 
 [buildozer]
 log_level = 2
