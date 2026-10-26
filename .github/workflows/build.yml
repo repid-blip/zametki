@@ -20,8 +20,12 @@ jobs:
           pip install --upgrade pip buildozer "cython<3" virtualenv
       - uses: actions/cache@v4
         with:
-          path: .buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}
+          # кешируем ОБА каталога: и проект, и SDK/NDK в домашней папке,
+          # иначе Buildozer «помнит» установку, а самого SDK на раннере уже нет
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
       - name: Build
         run: |
           # Java 11 нужна старому sdkmanager (установка Android SDK),
