@@ -23,8 +23,6 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          # кешируем ОБА каталога: и проект, и SDK/NDK в домашней папке,
-          # иначе Buildozer «помнит» установку, а самого SDK на раннере уже нет
           path: |
             .buildozer
             ~/.buildozer
@@ -38,7 +36,7 @@ jobs:
           mv xray xray_arm64
           chmod +x xray_arm64
           
-          # 32-битная версия (armeabi-v7a)
+          # 32-битная версия (armeabi-v7a) — исправлено имя архива
           wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm32-v7a.zip -O xray32.zip
           unzip -o xray32.zip xray
           mv xray xray_arm32
@@ -49,8 +47,6 @@ jobs:
 
       - name: Build
         run: |
-          # Java 11 нужна старому sdkmanager (установка Android SDK),
-          # а сам Gradle ниже запускаем на Java 17
           export JAVA_HOME="$JAVA_HOME_11_X64"
           export PATH="$JAVA_HOME/bin:$PATH"
           mkdir -p ~/.gradle
