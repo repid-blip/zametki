@@ -21,27 +21,35 @@ jobs:
             cmake libffi-dev libssl-dev
           pip install --upgrade pip buildozer "cython<3" virtualenv
 
-      - uses: actions/cache@v4
+      - name: Cache Buildozer
+        uses: actions/cache@v4
         with:
           path: |
             .buildozer
             ~/.buildozer
           key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-v2-
 
       - name: Download Xray for Android
         run: |
+          # Используем конкретную версию, чтобы избежать проблем с тегом latest
+          XRAY_VERSION="v1.8.8"
+
           # 64-битная версия (arm64-v8a)
-          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip -O xray64.zip
+          echo "Downloading Xray for arm64-v8a..."
+          curl -fL -o xray64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
           unzip -o xray64.zip xray
           mv xray xray_arm64
           chmod +x xray_arm64
-          
-          # 32-битная версия (armeabi-v7a) — исправлено имя архива
-          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm32-v7a.zip -O xray32.zip
+
+          # 32-битная версия (armeabi-v7a)
+          echo "Downloading Xray for armeabi-v7a..."
+          curl -fL -o xray32.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm32-v7a.zip"
           unzip -o xray32.zip xray
           mv xray xray_arm32
           chmod +x xray_arm32
-          
+
           # Проверяем, что оба файла на месте
           ls -lh xray_arm64 xray_arm32
 
