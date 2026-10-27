@@ -13,15 +13,13 @@ android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a, armeabi-v7a
 android.accept_sdk_license = True
+android.extract_native_libs = True
 
-# Стабильная версия python-for-android (Python 3.11).
 p4a.branch = v2024.01.21
 
 # --- Упаковываем xray как нативные библиотеки ---
-# Android разрешает выполнение только из nativeLibraryDir.
-# Переименование в .so заставляет систему извлечь их туда.
 android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
-android.add_libs_armeabi = libs/armeabi-v7a/*.so
+android.add_libs_armeabi_v7a = libs/armeabi-v7a/*.so
 
 [buildozer]
 log_level = 2
