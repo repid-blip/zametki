@@ -1,8 +1,7 @@
 """Запуск Xray с выбранным узлом из VPN-ключа (vless / vmess / trojan / ss).
 
 На Android бинарники xray упаковываются в APK как .so-библиотеки (android.add_libs_*).
-Android автоматически извлекает их в nativeLibraryDir, откуда их можно запускать
-(в отличие от приватной папки приложения, где стоит запрет на выполнение).
+Android автоматически извлекает их в nativeLibraryDir, откуда их можно запускать.
 """
 import json
 import os
@@ -22,12 +21,19 @@ def _get_native_lib_dir():
         from jnius import autoclass
         try:
             PythonService = autoclass('org.kivy.android.PythonService')
-            return PythonService.mService.getApplicationInfo().nativeLibraryDir
+            if PythonService.mService:
+                return PythonService.mService.getApplicationInfo().nativeLibraryDir
         except Exception:
+            pass
+        try:
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            return PythonActivity.mActivity.getApplicationInfo().nativeLibraryDir
+            if PythonActivity.mActivity:
+                return PythonActivity.mActivity.getApplicationInfo().nativeLibraryDir
+        except Exception:
+            pass
     except Exception:
-        return None
+        pass
+    return None
 
 
 class VpnRunner:
@@ -52,8 +58,7 @@ class VpnRunner:
         return (f"socks5://{self.socks_user}:{self.socks_password}"
                 f"@127.0.0.1:{self.socks_port}")
 
-    @staticmethod
-    def find_xray():
+    def find_xray(self):
         # 1. Сначала ищем в PATH (обычно для ПК: Linux/macOS/Windows)
         names = ("xray.exe", "xray") if os.name == "nt" else ("xray",)
         for name in names:
@@ -78,24 +83,24 @@ class VpnRunner:
         native_dir = _get_native_lib_dir()
         if native_dir:
             arch = platform.machine().lower()
+            self._log(f"[vpn] Архитектура: {arch}, nativeLibraryDir: {native_dir}")
+            try:
+                files = os.listdir(native_dir)
+                self._log(f"[vpn] Файлы в nativeLibraryDir: {files}")
+            except Exception as e:
+                self._log(f"[vpn] Ошибка чтения nativeLibraryDir: {e}")
+
             if arch in ("aarch64", "arm64", "arm64-v8a"):
                 lib_name = "libxray_arm64.so"
             else:
                 lib_name = "libxray_arm32.so"
-            
+
             for name in (lib_name, "libxray.so"):
                 p = os.path.join(native_dir, name)
                 if os.path.isfile(p):
                     return p
 
-        # 4. Fallback: ANDROID_PRIVATE (вдруг кто-то положил туда вручную)
-        priv = os.environ.get("ANDROID_PRIVATE")
-        if priv:
-            for name in names:
-                p = os.path.join(priv, name)
-                if p and os.path.isfile(p):
-                    return p
-                    
+        self._log("[vpn] xray не найден ни в PATH, ни в nativeLibraryDir.")
         return None
 
     def start(self, vpn_text):
@@ -105,8 +110,7 @@ class VpnRunner:
 
         exe = self.find_xray()
         if not exe:
-            self.error = ("xray не найден. Проверьте, что APK собран с "
-                          "android.add_libs_* или установите xray в PATH.")
+            self.error = "xray не найден (см. подробности в журнале)."
             self._log(f"[vpn] {self.error}")
             return False
 
