@@ -8,9 +8,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -18,6 +20,7 @@ jobs:
             pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
             cmake libffi-dev libssl-dev
           pip install --upgrade pip buildozer "cython<3" virtualenv
+
       - uses: actions/cache@v4
         with:
           # кешируем ОБА каталога: и проект, и SDK/NDK в домашней папке,
@@ -26,6 +29,23 @@ jobs:
             .buildozer
             ~/.buildozer
           key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
+
+      # --- НОВЫЙ ШАГ ---
+      - name: Download Xray for Android
+        run: |
+          # Скачиваем последнюю версию Xray для Android (arm64-v8a)
+          # Флаг -L нужен для редиректа, -q (тихий режим), -O (сохранить как)
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip -O xray.zip
+          
+          # Распаковываем только сам бинарник xray
+          unzip -o xray.zip xray
+          
+          # Даём права на исполнение
+          chmod +x xray
+          
+          # Проверяем, что файл на месте и весит столько, сколько нужно
+          ls -lh xray
+
       - name: Build
         run: |
           # Java 11 нужна старому sdkmanager (установка Android SDK),
@@ -36,6 +56,7 @@ jobs:
           echo "org.gradle.java.home=$JAVA_HOME_17_X64" >> ~/.gradle/gradle.properties
           java -version
           buildozer -v android debug
+
       - uses: actions/upload-artifact@v4
         with:
           name: notesbot-apk
