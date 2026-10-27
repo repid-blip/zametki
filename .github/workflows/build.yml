@@ -34,23 +34,23 @@ jobs:
       - name: Download Xray for Android
         run: |
           XRAY_VERSION="v1.8.8"
+          mkdir -p libs/arm64-v8a libs/armeabi-v7a
 
-          # 64-битная версия (arm64-v8a) — Android-сборка
+          # 64-битная версия
           echo "Downloading Xray for arm64-v8a..."
           curl -fL -o xray64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
           unzip -o xray64.zip xray
-          mv xray xray_arm64
-          chmod +x xray_arm64
+          mv xray libs/arm64-v8a/libxray_arm64.so
+          chmod +x libs/arm64-v8a/libxray_arm64.so
 
-          # 32-битная версия (armeabi-v7a) — используется Linux-сборка
+          # 32-битная версия (Linux-сборка подходит для Android)
           echo "Downloading Xray for armeabi-v7a..."
           curl -fL -o xray32.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-arm32-v7a.zip"
           unzip -o xray32.zip xray
-          mv xray xray_arm32
-          chmod +x xray_arm32
+          mv xray libs/armeabi-v7a/libxray_arm32.so
+          chmod +x libs/armeabi-v7a/libxray_arm32.so
 
-          # Проверяем, что оба файла на месте
-          ls -lh xray_arm64 xray_arm32
+          ls -lh libs/arm64-v8a/libxray_arm64.so libs/armeabi-v7a/libxray_arm32.so
 
       - name: Build
         run: |
