@@ -1,148 +1,246 @@
-"""Запуск локального MTProto-прокси (код из проекта tg-ws-proxy) в отдельном
-потоке сервиса — рядом с ботом для заметок.
+"""Запуск Xray с выбранным узлом из VPN-ключа (vless / vmess / trojan / ss).
 
-Telegram на этом же телефоне подключается к 127.0.0.1:<порт>, а прокси
-пересылает трафик через WebSocket-соединения.
+Xray слушает SOCKS5 на 127.0.0.1:<порт> БЕЗ пароля, чтобы бот (tgnet)
+мог подключиться. Парсинг ключа и сборка конфига — в vpnlink.py.
+
+На Android бинарники xray упаковываются в APK как .so-библиотеки (android.add_libs_*).
+Android автоматически извлекает их в nativeLibraryDir, откуда их можно запускать.
 """
-import asyncio
-import errno
-import logging
-import threading
+import json
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import time
 
-DC_IP = ["2:149.154.167.220", "4:149.154.167.220"]
+import vpnlink
+from common import data_dir, load_vpn_cache, save_vpn_cache
 
 
-class _LogHandler(logging.Handler):
-    """Перенаправляет журнал прокси в общий журнал приложения."""
-
-    def __init__(self, fn):
-        super().__init__(logging.INFO)
-        self.fn = fn
-        self.setFormatter(logging.Formatter("%(message)s"))
-
-    def emit(self, record):
+def _get_native_lib_dir():
+    """Получает путь к папке nativeLibraryDir на Android (где лежат .so)."""
+    try:
+        from jnius import autoclass
         try:
-            msg = self.format(record)
-            if not msg.strip() or set(msg.strip()) == {"="}:
-                return  # декоративные линии из баннера
-            self.fn("[прокси] " + msg)
+            PythonService = autoclass('org.kivy.android.PythonService')
+            if PythonService.mService:
+                return PythonService.mService.getApplicationInfo().nativeLibraryDir
         except Exception:
             pass
+        try:
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            if PythonActivity.mActivity:
+                return PythonActivity.mActivity.getApplicationInfo().nativeLibraryDir
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
 
 
-class ProxyRunner:
+class VpnRunner:
     def __init__(self, log):
         self._log = log
-        self.thread = None
+        self.proc = None
         self.error = None
-        self._mod = None
-        self._loop = None
-        self._stop_ev = None
-        self._want_stop = False
-        self._handler = None
-        self._port = None
+        self.node_name = ""
+        self.socks_port = 0
+        self._config_path = ""
 
     @property
     def alive(self):
-        return self.thread is not None and self.thread.is_alive()
+        return self.proc is not None and self.proc.poll() is None
 
     @property
-    def listening(self):
-        return bool(self._mod and getattr(self._mod, "_server_instance", None) is not None)
+    def proxy_url(self):
+        """Возвращает URL без логина и пароля, так как Xray работает без авторизации."""
+        if not self.alive or not self.socks_port:
+            return ""
+        return f"socks5://127.0.0.1:{self.socks_port}"
 
-    # ---------- запуск ----------
-    def start(self, port, secret):
-        self.error = None
-        self._want_stop = False
-        self._port = port
-        try:
-            from proxy import parse_dc_ip_list, proxy_config
-            from proxy import tg_ws_proxy as mod
+    def find_xray(self):
+        # 1. Сначала ищем в PATH (обычно для ПК: Linux/macOS/Windows)
+        names = ("xray.exe", "xray") if os.name == "nt" else ("xray",)
+        for name in names:
+            exe = shutil.which(name)
+            if exe:
+                return exe
 
-            # заранее проверяем, что AES доступен (иначе прокси не заработает)
-            from proxy._aes import Cipher, algorithms, modes
-            Cipher(algorithms.AES(bytes(32)), modes.CTR(bytes(16))).encryptor().update(b"x")
-        except Exception as e:
-            self.error = f"Прокси не запустился: {e}"
-            self._log(f"[прокси] {self.error}")
-            return False
-        self._mod = mod
+        # 2. Ищем рядом с кодом проекта (для ПК)
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = []
+        for name in names:
+            candidates += [
+                os.path.join(here, name),
+                os.path.join(here, "bin", name),
+            ]
 
-        proxy_config.host = "127.0.0.1"
-        proxy_config.port = int(port)
-        proxy_config.secret = secret
-        proxy_config.dc_redirects = parse_dc_ip_list(DC_IP)
-        proxy_config.buffer_size = 256 * 1024
-        proxy_config.pool_size = 4
-        proxy_config.fallback_cfproxy = True
-        proxy_config.cfproxy_user_domains = []
-        proxy_config.cfproxy_worker_domains = []
-        proxy_config.cfproxy_h2_media = False  # HTTP/2 (httpx) в Android-версии не ставим
-        proxy_config.disable_secure = False
-        proxy_config.fake_tls_domain = ""
-        proxy_config.proxy_protocol = False
-        proxy_config.force_test_dc = False
+        for p in candidates:
+            if p and os.path.isfile(p):
+                return p
 
-        self._attach_log()
-        self.thread = threading.Thread(target=self._work, daemon=True, name="proxy")
-        self.thread.start()
-        return True
+        # 3. Android: ищем в nativeLibraryDir (куда попадают .so из APK)
+        native_dir = _get_native_lib_dir()
+        if native_dir:
+            arch = platform.machine().lower()
+            self._log(f"[vpn] Архитектура: {arch}, nativeLibraryDir: {native_dir}")
+            try:
+                files = os.listdir(native_dir)
+                self._log(f"[vpn] Файлы в nativeLibraryDir: {files}")
+            except Exception as e:
+                self._log(f"[vpn] Ошибка чтения nativeLibraryDir: {e}")
 
-    def _attach_log(self):
-        lg = logging.getLogger("tg-mtproto-proxy")
-        lg.setLevel(logging.INFO)
-        if self._handler is None:
-            self._handler = _LogHandler(self._log)
-            lg.addHandler(self._handler)
-        logging.getLogger("asyncio").setLevel(logging.WARNING)
-
-    def _detach_log(self):
-        if self._handler is not None:
-            logging.getLogger("tg-mtproto-proxy").removeHandler(self._handler)
-            self._handler = None
-
-    def _work(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        stop_ev = asyncio.Event()
-        self._loop, self._stop_ev = loop, stop_ev
-        if self._want_stop:
-            stop_ev.set()
-        try:
-            loop.run_until_complete(self._mod._run(stop_event=stop_ev))
-        except Exception as e:
-            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
-                self.error = f"Порт {self._port} занят другим приложением"
+            if arch in ("aarch64", "arm64", "arm64-v8a"):
+                lib_name = "libxray_arm64.so"
             else:
-                self.error = f"Ошибка прокси: {e}"
-            self._log(f"[прокси] {self.error}")
+                lib_name = "libxray_arm32.so"
+
+            for name in (lib_name, "libxray.so"):
+                p = os.path.join(native_dir, name)
+                if os.path.isfile(p):
+                    return p
+
+        self._log("[vpn] xray не найден ни в PATH, ни в nativeLibraryDir.")
+        return None
+
+    def start(self, vpn_text):
+        self.error = None
+        if self.alive:
+            return True
+
+        exe = self.find_xray()
+        if not exe:
+            self.error = "xray не найден (см. подробности в журнале)."
+            self._log(f"[vpn] {self.error}")
+            return False
+
+        cache = load_vpn_cache()
+        try:
+            nodes = vpnlink.load_nodes(
+                vpn_text,
+                log=lambda m: self._log(f"[vpn] {m}"),
+                cache=cache,
+            )
+        except Exception as e:
+            self.error = f"Ошибка разбора ключа: {e}"
+            self._log(f"[vpn] {self.error}")
+            return False
         finally:
             try:
-                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                loop.run_until_complete(loop.shutdown_asyncgens())
+                save_vpn_cache(cache)
             except Exception:
                 pass
-            loop.close()
-            self._loop = self._stop_ev = None
 
-    # ---------- остановка ----------
+        if not nodes:
+            self.error = "Нет рабочих узлов в ключе/подписке"
+            self._log(f"[vpn] {self.error}")
+            return False
+
+        node = nodes[0]
+        self.node_name = node.name
+        self.socks_port = self._free_port()
+
+        # Собираем базовый конфиг (с аутентификацией, как в vpnlink)
+        try:
+            cfg = vpnlink.build_xray_config(
+                node, self.socks_port,
+                "dummy", "dummy")
+        except Exception as e:
+            self.error = f"Конфиг Xray не собрался: {e}"
+            self._log(f"[vpn] {self.error}")
+            return False
+
+        # Принудительно отключаем аутентификацию для входящего SOCKS5,
+        # чтобы tgnet мог подключиться без логина и пароля.
+        cfg["inbounds"][0]["settings"]["auth"] = "noauth"
+        if "accounts" in cfg["inbounds"][0]["settings"]:
+            del cfg["inbounds"][0]["settings"]["accounts"]
+
+        path = os.path.join(data_dir(), "xray-config.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False)
+            self._config_path = path
+        except OSError as e:
+            self.error = f"Не удалось записать конфиг Xray: {e}"
+            self._log(f"[vpn] {self.error}")
+            return False
+
+        self._log(f"[vpn] Узел «{node.name}» — "
+                  f"{node.protocol} {node.host}:{node.port}")
+        try:
+            self.proc = subprocess.Popen(
+                [exe, "run", "-c", path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                cwd=data_dir(),
+            )
+        except Exception as e:
+            self.error = f"xray не запустился: {e}"
+            self._log(f"[vpn] {self.error}")
+            self._cleanup()
+            return False
+
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            if not self.alive:
+                tail = b""
+                try:
+                    tail = self.proc.stderr.read(4096) or b""
+                except Exception:
+                    pass
+                msg = tail.decode("utf-8", "replace").strip()
+                self.error = (f"xray завершился (код {self.proc.returncode})"
+                              + (f": {msg[:200]}" if msg else ""))
+                self._log(f"[vpn] {self.error}")
+                self._cleanup()
+                return False
+            if self._port_open():
+                self._log(f"[vpn] SOCKS5 готов (без пароля): 127.0.0.1:{self.socks_port}")
+                return True
+            time.sleep(0.2)
+
+        self.error = "xray не открыл SOCKS5 за 12 секунд"
+        self._log(f"[vpn] {self.error}")
+        self.stop()
+        return False
+
+    def _port_open(self):
+        try:
+            with socket.create_connection(
+                    ("127.0.0.1", self.socks_port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
     def stop(self):
-        self._want_stop = True
-        loop, ev = self._loop, self._stop_ev
-        if loop is not None and ev is not None:
+        proc = self.proc
+        self.proc = None
+        if proc is not None:
             try:
-                loop.call_soon_threadsafe(ev.set)
-            except RuntimeError:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            except Exception:
                 pass
-        if self.thread is not None:
-            self.thread.join(timeout=8)
-            if self.thread.is_alive():
-                self._log("[прокси] Поток не остановился за 8 с — порт может быть занят")
-            else:
-                self._log("[прокси] Остановлен")
-        self.thread = None
-        self._detach_log()
+            self._log("[vpn] Остановлен")
+        self._cleanup()
+
+    def _cleanup(self):
+        if self._config_path:
+            try:
+                os.remove(self._config_path)
+            except OSError:
+                pass
+            self._config_path = ""
+        self.socks_port = 0
+        self.node_name = ""
