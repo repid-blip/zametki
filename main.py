@@ -1,8 +1,8 @@
 """Notes Bot Launcher — Android-приложение, которое запускает Telegram-бота
-для заметок прямо на телефоне, а также локальный прокси для Telegram
-(фоновый сервис + пастельно-розовый интерфейс).
+для заметок прямо на телефоне, а также встроенный VPN (Xray) — чтобы бот
+мог достучаться до Telegram там, где он заблокирован.
 
-Проверка на компьютере:  pip install kivy certifi && python main.py
+На ПК для проверки:  pip install kivy certifi && python main.py
 """
 import os
 import re
@@ -28,13 +28,11 @@ from kivy.uix.label import Label
 from kivy.utils import platform
 
 from common import (
-    clear_proxy_status,
     clear_status,
-    ensure_proxy_config,
+    clear_vpn_status,
     load_config,
-    proxy_link,
-    read_proxy_status,
     read_status,
+    read_vpn_status,
     save_config,
     tail_log,
 )
@@ -52,7 +50,7 @@ DOT_COLORS = {
     "error": (0.93, 0.45, 0.5, 1),
 }
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
-STALE_AFTER = 75  # секунд без «пульса» от сервиса — считаем, что он не отвечает
+STALE_AFTER = 75  # секунд без «пульса» от сервиса
 
 KV = """
 #:import dp kivy.metrics.dp
@@ -97,7 +95,7 @@ KV = """
         id: field
         hint_text: root.hint_text
         password: root.password
-        multiline: False
+        multiline: root.multiline
         background_normal: ''
         background_active: ''
         background_color: 0, 0, 0, 0
@@ -116,202 +114,213 @@ KV = """
         Rectangle:
             pos: self.pos
             size: self.size
+
     BoxLayout:
         orientation: 'vertical'
-        padding: dp(18), dp(14), dp(18), dp(18)
-        spacing: dp(12)
+        padding: dp(18), dp(14), dp(18), dp(14)
+        spacing: dp(10)
 
-        BoxLayout:
-            orientation: 'vertical'
-            size_hint_y: None
-            height: dp(72)
-            Label:
-                text: 'Notes Bot'
-                color: INK
-                bold: True
-                font_size: '30sp'
-                halign: 'left'
-                valign: 'middle'
-                text_size: self.size
-                size_hint_y: .62
-            Label:
-                text: 'Telegram-бот для заметок на этом телефоне'
-                color: MUTED
-                font_size: '14sp'
-                halign: 'left'
-                valign: 'top'
-                text_size: self.size
-                size_hint_y: .38
+        # ============== ВЕРХ: прокручиваемые настройки ==============
+        ScrollView:
+            id: page_scroll
+            do_scroll_x: False
+            bar_width: dp(3)
+            bar_color: ACCENT
 
-        BoxLayout:
-            size_hint_y: None
-            height: dp(84)
-            padding: dp(20), dp(14)
-            spacing: dp(16)
-            canvas.before:
-                Color:
-                    rgba: 0.9, 0.6, 0.72, 0.2
-                RoundedRectangle:
-                    pos: self.x, self.y - dp(2)
-                    size: self.size
-                    radius: [dp(24)]
-                Color:
-                    rgba: 1, 1, 1, 1
-                RoundedRectangle:
-                    pos: self.pos
-                    size: self.size
-                    radius: [dp(24)]
-            Widget:
-                size_hint: None, None
-                size: dp(18), dp(18)
-                pos_hint: {'center_y': .5}
-                canvas:
-                    Color:
-                        rgba: root.dot_color
-                    Ellipse:
-                        pos: self.pos
-                        size: self.size
             BoxLayout:
                 orientation: 'vertical'
-                Label:
-                    text: root.status_title
-                    color: INK
-                    bold: True
-                    font_size: '18sp'
-                    halign: 'left'
-                    valign: 'bottom'
-                    text_size: self.size
-                Label:
-                    text: root.status_detail
-                    color: MUTED
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(12)
+                padding: 0, 0, 0, dp(6)
+
+                BoxLayout:
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: dp(72)
+                    Label:
+                        text: 'Notes Bot'
+                        color: INK
+                        bold: True
+                        font_size: '30sp'
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.size
+                        size_hint_y: .62
+                    Label:
+                        text: 'Telegram-бот и локальный VPN на этом телефоне'
+                        color: MUTED
+                        font_size: '14sp'
+                        halign: 'left'
+                        valign: 'top'
+                        text_size: self.size
+                        size_hint_y: .38
+
+                # --- статус бота ---
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(84)
+                    padding: dp(20), dp(14)
+                    spacing: dp(16)
+                    canvas.before:
+                        Color:
+                            rgba: 0.9, 0.6, 0.72, 0.2
+                        RoundedRectangle:
+                            pos: self.x, self.y - dp(2)
+                            size: self.size
+                            radius: [dp(24)]
+                        Color:
+                            rgba: 1, 1, 1, 1
+                        RoundedRectangle:
+                            pos: self.pos
+                            size: self.size
+                            radius: [dp(24)]
+                    Widget:
+                        size_hint: None, None
+                        size: dp(18), dp(18)
+                        pos_hint: {'center_y': .5}
+                        canvas:
+                            Color:
+                                rgba: root.dot_color
+                            Ellipse:
+                                pos: self.pos
+                                size: self.size
+                    BoxLayout:
+                        orientation: 'vertical'
+                        Label:
+                            text: root.status_title
+                            color: INK
+                            bold: True
+                            font_size: '18sp'
+                            halign: 'left'
+                            valign: 'bottom'
+                            text_size: self.size
+                        Label:
+                            text: root.status_detail
+                            color: MUTED
+                            font_size: '13sp'
+                            halign: 'left'
+                            valign: 'top'
+                            max_lines: 2
+                            text_size: self.size
+
+                InputBox:
+                    id: token
+                    hint_text: 'Токен бота (от @BotFather)'
+                    password: True
+                    size_hint_y: None
+                    height: dp(52)
+                    disabled: root.running
+
+                PinkButton:
+                    text: root.button_text
+                    bg: root.toggle_bg
+                    color: root.toggle_color
+                    height: dp(52)
+                    font_size: '17sp'
+                    radius: dp(26)
+                    shadow: True
+                    on_release: app.toggle()
+
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(10)
+                    PinkButton:
+                        text: 'Показать токен' if token.password else 'Скрыть токен'
+                        font_size: '13sp'
+                        height: dp(44)
+                        bg: SOFT
+                        color: DARK_TEXT
+                        on_release: token.password = not token.password
+                    PinkButton:
+                        text: 'Не засыпать (батарея)'
+                        font_size: '13sp'
+                        height: dp(44)
+                        bg: SOFT
+                        color: DARK_TEXT
+                        on_release: app.open_battery_settings()
+
+                # --- статус VPN ---
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(62)
+                    padding: dp(20), dp(10)
+                    spacing: dp(16)
+                    canvas.before:
+                        Color:
+                            rgba: 0.9, 0.6, 0.72, 0.2
+                        RoundedRectangle:
+                            pos: self.x, self.y - dp(2)
+                            size: self.size
+                            radius: [dp(24)]
+                        Color:
+                            rgba: 1, 1, 1, 1
+                        RoundedRectangle:
+                            pos: self.pos
+                            size: self.size
+                            radius: [dp(24)]
+                    Widget:
+                        size_hint: None, None
+                        size: dp(16), dp(16)
+                        pos_hint: {'center_y': .5}
+                        canvas:
+                            Color:
+                                rgba: root.vpn_dot_color
+                            Ellipse:
+                                pos: self.pos
+                                size: self.size
+                    BoxLayout:
+                        orientation: 'vertical'
+                        Label:
+                            text: root.vpn_title
+                            color: INK
+                            bold: True
+                            font_size: '16sp'
+                            halign: 'left'
+                            valign: 'bottom'
+                            text_size: self.size
+                        Label:
+                            text: root.vpn_detail
+                            color: MUTED
+                            font_size: '12sp'
+                            halign: 'left'
+                            valign: 'top'
+                            max_lines: 1
+                            text_size: self.size
+
+                InputBox:
+                    id: vpn_links
+                    hint_text: 'VPN-ключ (vless:// / vmess:// / trojan:// / ss:// / ссылка на подписку)'
+                    multiline: True
+                    size_hint_y: None
+                    height: dp(84)
+                    disabled: root.vpn_running
+
+                PinkButton:
+                    text: root.vpn_button_text
+                    bg: root.vpn_toggle_bg
+                    color: root.vpn_toggle_color
+                    height: dp(44)
                     font_size: '13sp'
-                    halign: 'left'
-                    valign: 'top'
-                    max_lines: 2
-                    text_size: self.size
+                    radius: dp(22)
+                    on_release: app.toggle_vpn()
 
-        InputBox:
-            id: token
-            hint_text: 'Токен бота (от @BotFather)'
-            password: True
-            size_hint_y: None
-            height: dp(52)
-            disabled: root.running
-
-        PinkButton:
-            text: root.button_text
-            bg: root.toggle_bg
-            color: root.toggle_color
-            height: dp(56)
-            font_size: '17sp'
-            radius: dp(28)
-            shadow: True
-            on_release: app.toggle()
-
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(10)
-            PinkButton:
-                text: 'Показать токен' if token.password else 'Скрыть токен'
-                font_size: '13sp'
-                height: dp(44)
-                bg: SOFT
-                color: DARK_TEXT
-                on_release: token.password = not token.password
-            PinkButton:
-                text: 'Не засыпать (батарея)'
-                font_size: '13sp'
-                height: dp(44)
-                bg: SOFT
-                color: DARK_TEXT
-                on_release: app.open_battery_settings()
-
-        BoxLayout:
-            size_hint_y: None
-            height: dp(62)
-            padding: dp(20), dp(10)
-            spacing: dp(16)
-            canvas.before:
-                Color:
-                    rgba: 0.9, 0.6, 0.72, 0.2
-                RoundedRectangle:
-                    pos: self.x, self.y - dp(2)
-                    size: self.size
-                    radius: [dp(24)]
-                Color:
-                    rgba: 1, 1, 1, 1
-                RoundedRectangle:
-                    pos: self.pos
-                    size: self.size
-                    radius: [dp(24)]
-            Widget:
-                size_hint: None, None
-                size: dp(16), dp(16)
-                pos_hint: {'center_y': .5}
-                canvas:
-                    Color:
-                        rgba: root.proxy_dot_color
-                    Ellipse:
-                        pos: self.pos
-                        size: self.size
-            BoxLayout:
-                orientation: 'vertical'
                 Label:
-                    text: root.proxy_title
-                    color: INK
-                    bold: True
-                    font_size: '16sp'
-                    halign: 'left'
-                    valign: 'bottom'
-                    text_size: self.size
-                Label:
-                    text: root.proxy_detail
-                    color: MUTED
-                    font_size: '12sp'
-                    halign: 'left'
-                    valign: 'top'
-                    max_lines: 1
-                    text_size: self.size
+                    text: root.message
+                    color: 0.8, 0.35, 0.45, 1
+                    font_size: '13sp'
+                    size_hint_y: None
+                    height: dp(18) if root.message else 0
+                    text_size: self.width, None
+                    halign: 'center'
 
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(10)
-            PinkButton:
-                text: root.proxy_button_text
-                font_size: '13sp'
-                height: dp(44)
-                bg: root.proxy_toggle_bg
-                color: root.proxy_toggle_color
-                on_release: app.toggle_proxy()
-            PinkButton:
-                text: 'В Telegram'
-                font_size: '13sp'
-                height: dp(44)
-                bg: SOFT
-                color: DARK_TEXT
-                on_release: app.open_proxy_link()
-            PinkButton:
-                text: 'Копировать'
-                font_size: '13sp'
-                height: dp(44)
-                bg: SOFT
-                color: DARK_TEXT
-                on_release: app.copy_proxy_link()
-
-        Label:
-            text: root.message
-            color: 0.8, 0.35, 0.45, 1
-            font_size: '13sp'
-            size_hint_y: None
-            height: dp(18) if root.message else 0
-            text_size: self.width, None
-            halign: 'center'
-
+        # ============== НИЗ: отдельное окно журнала ==============
         BoxLayout:
             orientation: 'vertical'
-            padding: dp(16)
+            size_hint_y: None
+            height: dp(220)
+            padding: dp(16), dp(10), dp(16), dp(10)
             spacing: dp(6)
             canvas.before:
                 Color:
@@ -337,6 +346,7 @@ KV = """
                 height: dp(20)
             ScrollView:
                 id: log_scroll
+                do_scroll_x: False
                 bar_width: dp(3)
                 bar_color: ACCENT
                 Label:
@@ -361,9 +371,11 @@ class PinkButton(ButtonBehavior, Label):
 class InputBox(BoxLayout):
     hint_text = StringProperty("")
     password = BooleanProperty(False)
+    multiline = BooleanProperty(False)
 
 
 class Root(FloatLayout):
+    # бот
     status_title = StringProperty("")
     status_detail = StringProperty("")
     dot_color = ColorProperty(DOT_COLORS["stopped"])
@@ -373,12 +385,14 @@ class Root(FloatLayout):
     toggle_color = ColorProperty((1, 1, 1, 1))
     log_text = StringProperty("")
     message = StringProperty("")
-    proxy_title = StringProperty("")
-    proxy_detail = StringProperty("")
-    proxy_dot_color = ColorProperty(DOT_COLORS["stopped"])
-    proxy_button_text = StringProperty("Включить прокси")
-    proxy_toggle_bg = ColorProperty(ACCENT)
-    proxy_toggle_color = ColorProperty((1, 1, 1, 1))
+    # VPN
+    vpn_title = StringProperty("")
+    vpn_detail = StringProperty("")
+    vpn_dot_color = ColorProperty(DOT_COLORS["stopped"])
+    vpn_running = BooleanProperty(False)
+    vpn_button_text = StringProperty("Включить VPN")
+    vpn_toggle_bg = ColorProperty(ACCENT)
+    vpn_toggle_color = ColorProperty((1, 1, 1, 1))
 
 
 class BotLauncherApp(App):
@@ -389,27 +403,28 @@ class BotLauncherApp(App):
         Window.clearcolor = BG
         if platform == "android":
             Window.softinput_mode = "below_target"
-        self.proc = None  # процесс сервиса при проверке на ПК
+        self.proc = None
         self.requested_at = 0.0
-        self.proxy_requested_at = 0.0
+        self.vpn_requested_at = 0.0
         return Root()
 
     def on_start(self):
         cfg = load_config()
         self.root.ids.token.ids.field.text = cfg.get("token", "")
+        self.root.ids.vpn_links.ids.field.text = cfg.get("vpn_links", "")
         if cfg.get("enabled"):
             self.requested_at = time.time()
-        if cfg.get("proxy_enabled"):
-            self.proxy_requested_at = time.time()
+        if cfg.get("vpn_enabled"):
+            self.vpn_requested_at = time.time()
         if platform == "android":
             self._request_notification_permission()
         Clock.schedule_interval(self.tick, 1.5)
         self.tick()
 
     def on_pause(self):
-        return True  # сервис продолжает работать, пока приложение свёрнуто
+        return True
 
-    # ---------- кнопки ----------
+    # ---------- кнопки: бот ----------
     def toggle(self):
         if load_config().get("enabled"):
             self.stop_bot()
@@ -421,10 +436,11 @@ class BotLauncherApp(App):
         if not TOKEN_RE.match(token):
             return self.flash("Токен выглядит неверно. Он вида 123456:ABC-DEF…")
         clear_status()
-        save_config({**load_config(), "token": token, "enabled": True})
+        cfg = load_config()
+        cfg.update({"token": token, "enabled": True})
+        save_config(cfg)
         self.requested_at = time.time()
-        # сервис сам подхватит настройки; если он уже работает (например, из-за прокси),
-        # повторный запуск ничего не сломает
+        self._launch_stop()
         Clock.schedule_once(lambda dt: self._launch_start(), 0.7)
         self.tick()
 
@@ -432,70 +448,54 @@ class BotLauncherApp(App):
         cfg = load_config()
         save_config({**cfg, "enabled": False})
         clear_status()
-        if not cfg.get("proxy_enabled"):
-            self._launch_stop()  # прокси тоже выключен — сервис больше не нужен
+        if not cfg.get("vpn_enabled"):
+            self._launch_stop()
         self.tick()
 
-    # ---------- прокси ----------
-    def toggle_proxy(self):
-        if load_config().get("proxy_enabled"):
-            self.stop_proxy()
+    # ---------- кнопки: VPN ----------
+    def toggle_vpn(self):
+        if load_config().get("vpn_enabled"):
+            self.stop_vpn()
         else:
-            self.start_proxy()
+            self.start_vpn()
 
-    def start_proxy(self):
-        cfg = ensure_proxy_config()
-        clear_proxy_status()
-        save_config({**cfg, "proxy_enabled": True})
-        self.proxy_requested_at = time.time()
-        self._launch_start()
-        self.tick()
-
-    def stop_proxy(self):
+    def start_vpn(self):
+        text = self.root.ids.vpn_links.ids.field.text.strip()
+        if not text:
+            return self.flash("Вставь VPN-ключ или ссылку на подписку")
+        try:
+            import vpnlink
+            vpnlink.validate_source(text)
+        except ValueError as e:
+            return self.flash(f"VPN-ключ: {e}")
+        clear_vpn_status()
         cfg = load_config()
-        save_config({**cfg, "proxy_enabled": False})
-        clear_proxy_status()
-        if not cfg.get("enabled"):
-            self._launch_stop()  # бот тоже выключен — сервис больше не нужен
+        cfg.update({"vpn_links": text, "vpn_enabled": True})
+        save_config(cfg)
+        self.vpn_requested_at = time.time()
+        self._launch_stop()
+        Clock.schedule_once(lambda dt: self._launch_start(), 0.7)
         self.tick()
 
-    def open_proxy_link(self):
-        link = proxy_link(ensure_proxy_config())
-        try:
-            if platform == "android":
-                from jnius import autoclass
+    def stop_vpn(self):
+        cfg = load_config()
+        save_config({**cfg, "vpn_enabled": False})
+        clear_vpn_status()
+        if not cfg.get("enabled"):
+            self._launch_stop()
+        self.tick()
 
-                Intent = autoclass("android.content.Intent")
-                Uri = autoclass("android.net.Uri")
-                activity = autoclass("org.kivy.android.PythonActivity").mActivity
-                activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
-            else:
-                import webbrowser
-
-                webbrowser.open(link)
-        except Exception as e:
-            self.flash(f"Не удалось открыть Telegram: {e}")
-
-    def copy_proxy_link(self):
-        link = proxy_link(ensure_proxy_config())
-        try:
-            from kivy.core.clipboard import Clipboard
-
-            Clipboard.copy(link)
-            self.flash("Ссылка прокси скопирована")
-        except Exception as e:
-            self.flash(f"Не удалось скопировать: {e}")
-
+    # ---------- прочее ----------
     def open_battery_settings(self):
         if platform != "android":
             return self.flash("Эта настройка есть только на Android")
         try:
             from jnius import autoclass
-
             Intent = autoclass("android.content.Intent")
             Settings = autoclass("android.provider.Settings")
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            activity.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            activity.startActivity(
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             self.flash("Найди Notes Bot и выбери «Не ограничивать»")
         except Exception as e:
             self.flash(f"Не удалось открыть настройки: {e}")
@@ -503,32 +503,36 @@ class BotLauncherApp(App):
     # ---------- запуск/остановка сервиса ----------
     def _launch_start(self):
         cfg = load_config()
-        if not cfg.get("enabled") and not cfg.get("proxy_enabled"):
+        if not cfg.get("enabled") and not cfg.get("vpn_enabled"):
             return
         try:
             if platform == "android":
                 from jnius import autoclass
-
                 activity = autoclass("org.kivy.android.PythonActivity").mActivity
-                service = autoclass(activity.getPackageName() + ".ServiceBotservice")
+                service = autoclass(
+                    activity.getPackageName() + ".ServiceBotservice")
                 try:
                     service.start(activity, "")
-                except Exception:  # сигнатура старых версий python-for-android
+                except Exception:
                     service.start(activity, "", "Notes Bot", "Бот работает", "")
             else:
                 here = os.path.dirname(os.path.abspath(__file__))
-                self.proc = subprocess.Popen([sys.executable, "service.py"], cwd=here)
+                if self.proc is not None and self.proc.poll() is None:
+                    return
+                self.proc = subprocess.Popen(
+                    [sys.executable, "service.py"], cwd=here)
         except Exception as e:
-            save_config({**load_config(), "enabled": False, "proxy_enabled": False})
+            save_config({**load_config(),
+                         "enabled": False, "vpn_enabled": False})
             self.flash(f"Не удалось запустить сервис: {e}")
 
     def _launch_stop(self):
         try:
             if platform == "android":
                 from jnius import autoclass
-
                 activity = autoclass("org.kivy.android.PythonActivity").mActivity
-                service = autoclass(activity.getPackageName() + ".ServiceBotservice")
+                service = autoclass(
+                    activity.getPackageName() + ".ServiceBotservice")
                 service.stop(activity)
             elif self.proc:
                 self.proc.terminate()
@@ -539,7 +543,6 @@ class BotLauncherApp(App):
     def _request_notification_permission(self):
         try:
             from android.permissions import request_permissions
-
             request_permissions(["android.permission.POST_NOTIFICATIONS"])
         except Exception:
             pass
@@ -558,35 +561,36 @@ class BotLauncherApp(App):
             if st.get("msg"):
                 detail = f"{detail} · {st['msg']}" if detail else st["msg"]
             return "running", "Бот работает", detail
+        if st.get("state") == "error":
+            return "error", "Ошибка", st.get("msg", "")
         if now - self.requested_at < 30:
             return "starting", "Запускаю…", "Подключаюсь к Telegram"
         return "noresp", "Сервис не отвечает", "Нажми «Остановить» и запусти снова"
 
-    def compute_proxy_state(self):
+    def compute_vpn_state(self):
         cfg = load_config()
-        st = read_proxy_status()
+        st = read_vpn_status()
         now = time.time()
-        if not cfg.get("proxy_enabled"):
+        if not cfg.get("vpn_enabled"):
             if st.get("state") == "error":
-                return "error", "Прокси: ошибка", st.get("msg", "")
-            return "stopped", "Прокси выключен", "Включи и нажми «В Telegram»"
+                return "error", "VPN: ошибка", st.get("msg", "")
+            return "stopped", "VPN выключен", "Вставь ключ и включи"
+        if not cfg.get("vpn_links", "").strip():
+            return "error", "VPN: нет ключа", "Вставь ключ и нажми «Включить VPN»"
         if st.get("state") == "running" and now - st.get("ts", 0) < STALE_AFTER:
-            return "running", "Прокси работает", f"127.0.0.1:{cfg.get('proxy_port', '')}"
-        if now - self.proxy_requested_at < 30:
-            return "starting", "Запускаю прокси…", st.get("msg", "")
-        return "noresp", "Сервис не отвечает", "Выключи прокси и включи снова"
+            node = st.get("node") or ""
+            return ("running", "VPN работает",
+                    node[:60] if node else "туннель активен")
+        if st.get("state") == "error":
+            return "error", "VPN: ошибка", st.get("msg", "")
+        if now - self.vpn_requested_at < 30:
+            return "starting", "Запускаю VPN…", st.get("msg", "")
+        return "noresp", "VPN не отвечает", "Выключи и включи снова"
 
     def tick(self, *_):
         root = self.root
-        p_state, p_title, p_detail = self.compute_proxy_state()
-        p_active = p_state in ("running", "starting", "noresp")
-        root.proxy_title = p_title
-        root.proxy_detail = p_detail[:60]
-        root.proxy_dot_color = DOT_COLORS[p_state]
-        root.proxy_button_text = "Выключить прокси" if p_active else "Включить прокси"
-        root.proxy_toggle_bg = SOFT if p_active else ACCENT
-        root.proxy_toggle_color = DARK_TEXT if p_active else (1, 1, 1, 1)
 
+        # --- бот ---
         state, title, detail = self.compute_state()
         active = state in ("running", "starting", "noresp")
         root.status_title = title
@@ -597,10 +601,23 @@ class BotLauncherApp(App):
         root.toggle_bg = SOFT if active else ACCENT
         root.toggle_color = DARK_TEXT if active else (1, 1, 1, 1)
 
+        # --- VPN ---
+        v_state, v_title, v_detail = self.compute_vpn_state()
+        v_active = v_state in ("running", "starting", "noresp")
+        root.vpn_title = v_title
+        root.vpn_detail = v_detail[:60]
+        root.vpn_dot_color = DOT_COLORS[v_state]
+        root.vpn_running = v_active
+        root.vpn_button_text = "Выключить VPN" if v_active else "Включить VPN"
+        root.vpn_toggle_bg = SOFT if v_active else ACCENT
+        root.vpn_toggle_color = DARK_TEXT if v_active else (1, 1, 1, 1)
+
+        # --- журнал (автоскролл вниз, к свежим строкам) ---
         text = tail_log()
         if text != root.log_text:
             root.log_text = text
-            Clock.schedule_once(lambda dt: setattr(root.ids.log_scroll, "scroll_y", 0), 0.05)
+            Clock.schedule_once(
+                lambda dt: setattr(root.ids.log_scroll, "scroll_y", 0), 0.05)
 
     def flash(self, text):
         self.root.message = text

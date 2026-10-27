@@ -1,11 +1,14 @@
-"""Фоновый сервис: здесь живут бот для заметок и локальный прокси для Telegram.
-Запускается из main.py как Android-сервис (или как обычный процесс при проверке
-на компьютере).
+"""Фоновый сервис: здесь живут бот и VPN (Xray).
+
+Запускается из main.py как Android-сервис (или как обычный процесс при
+проверке на компьютере).
 
 Сервис следит за config.json и сам запускает/останавливает:
-  • бота      — когда "enabled": true и задан токен;
-  • прокси    — когда "proxy_enabled": true.
-Когда не нужно ни то ни другое, сервис завершается.
+  • VPN (Xray) — когда "vpn_enabled": true и задан "vpn_links";
+  • бота       — когда "enabled": true и задан токен.
+Бот ходит в Telegram через SOCKS5, который поднимает Xray; если VPN
+выключен, бот идёт напрямую. Когда не нужно ни то ни другое — сервис
+завершается.
 """
 import os
 import threading
@@ -14,19 +17,23 @@ import traceback
 
 from bot_core import Fatal, NotesBot
 from common import (
+    clear_vpn_status,
     data_dir,
-    file_path,
     load_config,
     log,
     save_config,
-    write_proxy_status,
     write_status,
+    write_vpn_status,
 )
-from proxy_runner import ProxyRunner
+from vpn_runner import VpnRunner
 
 LOOP_PERIOD = 2        # как часто проверяем настройки, сек
 BOT_RESTART_GAP = 10   # не перезапускать упавший поток бота чаще, сек
 LOCK_NAME = "service.lock"
+
+
+def _lock_path():
+    return os.path.join(data_dir(), LOCK_NAME)
 
 
 def acquire_wakelock():
@@ -37,7 +44,7 @@ def acquire_wakelock():
         PythonService = autoclass("org.kivy.android.PythonService")
         Context = autoclass("android.content.Context")
         pm = PythonService.mService.getSystemService(Context.POWER_SERVICE)
-        wl = pm.newWakeLock(1, "tgnotesbot:polling")  # 1 = PARTIAL_WAKE_LOCK
+        wl = pm.newWakeLock(1, "tgnotesbot:polling")  # PARTIAL_WAKE_LOCK
         wl.acquire()
         return wl
     except Exception:
@@ -56,7 +63,7 @@ def stop_self():
 # ---------- защита от двойного запуска ----------
 def _another_instance_alive():
     try:
-        with open(file_path(LOCK_NAME), encoding="utf-8") as f:
+        with open(_lock_path(), encoding="utf-8") as f:
             pid_s, ts_s = f.read().split()
         pid, ts = int(pid_s), float(ts_s)
     except (OSError, ValueError):
@@ -74,7 +81,7 @@ def _another_instance_alive():
 
 def _touch_lock():
     try:
-        with open(file_path(LOCK_NAME), "w", encoding="utf-8") as f:
+        with open(_lock_path(), "w", encoding="utf-8") as f:
             f.write(f"{os.getpid()} {time.time()}")
     except OSError:
         pass
@@ -82,7 +89,7 @@ def _touch_lock():
 
 def _remove_lock():
     try:
-        os.remove(file_path(LOCK_NAME))
+        os.remove(_lock_path())
     except OSError:
         pass
 
@@ -91,47 +98,66 @@ def _remove_lock():
 class BotRunner:
     def __init__(self):
         self.thread = None
+        self._stop = threading.Event()
+        self.proxy_used = ""
         self.last_start = 0.0
 
     @property
     def alive(self):
         return self.thread is not None and self.thread.is_alive()
 
-    def start(self, token):
+    def start(self, token, db_path, proxy_url):
+        self.proxy_used = proxy_url or ""
         self.last_start = time.time()
+        self._stop.clear()
+
+        # NotesBot читает config["proxy"] в __init__, если не передан явно.
+        # Записываем актуальный прокси, чтобы бот гарантированно его увидел.
+        cfg = load_config()
+        cfg["proxy"] = self.proxy_used
+        save_config(cfg)
+
         self.thread = threading.Thread(
-            target=self._work, args=(token,), daemon=True, name="bot"
-        )
+            target=self._work, args=(token, db_path, self._stop),
+            daemon=True, name="bot")
         self.thread.start()
 
+    def stop(self):
+        self._stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=45)
+            self.thread = None
+
     @staticmethod
-    def _work(token):
+    def _work(token, db_path, stop_ev):
         def should_stop():
-            return not load_config().get("enabled")
+            return stop_ev.is_set() or not load_config().get("enabled")
 
         write_status("starting")
         log("— Бот запущен —")
         try:
             bot = NotesBot(
-                token,
-                os.path.join(data_dir(), "notes.db"),
-                log,
-                should_stop=should_stop,
-                on_status=write_status,
-            )
-            while not should_stop():
-                try:
-                    bot.run()
-                except Fatal as e:
-                    log(f"Ошибка: {e}")
-                    write_status("error", msg=str(e))
-                    save_config({**load_config(), "enabled": False})
-                    break
-                except Exception:
-                    bot.log(traceback.format_exc())
-                    time.sleep(10)
+                token, db_path, log,
+                should_stop=should_stop, on_status=write_status)
+        except Fatal as e:
+            log(f"Ошибка: {e}")
+            write_status("error", msg=str(e))
+            save_config({**load_config(), "enabled": False})
+            return
         except Exception:
             log(traceback.format_exc())
+            write_status("error", msg="См. журнал")
+            save_config({**load_config(), "enabled": False})
+            return
+
+        try:
+            bot.run()
+        except Fatal as e:
+            log(f"Ошибка: {e}")
+            write_status("error", msg=str(e))
+            save_config({**load_config(), "enabled": False})
+        except Exception:
+            bot.log(traceback.format_exc())
         finally:
             log("— Бот остановлен —")
 
@@ -139,68 +165,72 @@ class BotRunner:
 # ---------- главный цикл ----------
 def main():
     cfg = load_config()
-    bot_wanted = bool(cfg.get("enabled") and cfg.get("token", "").strip())
-    if not bot_wanted and not cfg.get("proxy_enabled"):
-        return  # сервис перезапущен системой, но пользователь ничего не включал
+    want_bot_start = bool(cfg.get("enabled") and cfg.get("token", "").strip())
+    want_vpn_start = bool(cfg.get("vpn_enabled") and cfg.get("vpn_links", "").strip())
+    if not want_bot_start and not want_vpn_start:
+        return
     if _another_instance_alive():
-        return  # уже работает другой экземпляр сервиса
+        return
     _touch_lock()
 
     wakelock = acquire_wakelock()
     log("— Сервис запущен —")
     bot = BotRunner()
-    proxy = ProxyRunner(log)
-    proxy_started_at = 0.0
+    vpn = VpnRunner(log)
 
     try:
         while True:
             _touch_lock()
             cfg = load_config()
             token = cfg.get("token", "").strip()
+            vpn_links = cfg.get("vpn_links", "").strip()
             want_bot = bool(cfg.get("enabled") and token)
-            want_proxy = bool(cfg.get("proxy_enabled"))
+            want_vpn = bool(cfg.get("vpn_enabled") and vpn_links)
 
-            if not want_bot and not want_proxy and not bot.alive and not proxy.alive:
+            if not want_bot and not want_vpn and not bot.alive and not vpn.alive:
                 break
+
+            # --- VPN ---
+            if want_vpn and not vpn.alive and vpn.error is None:
+                write_vpn_status("starting")
+                if vpn.start(vpn_links):
+                    write_vpn_status("running", node=vpn.node_name)
+                else:
+                    write_vpn_status("error", msg=vpn.error or "не запустился")
+                    save_config({**load_config(), "vpn_enabled": False})
+            elif not want_vpn:
+                if vpn.alive:
+                    vpn.stop()
+                vpn.error = None
+                clear_vpn_status()
+            elif vpn.alive:
+                write_vpn_status("running", node=vpn.node_name)
+
+            # --- актуальный прокси для бота ---
+            desired_proxy = vpn.proxy_url if vpn.alive else ""
+
+            # Если бот уже работает с другим прокси (включили/выключили VPN) —
+            # перезапустим его, чтобы он подхватил новый SOCKS5.
+            if bot.alive and bot.proxy_used != desired_proxy:
+                bot.stop()
 
             # --- бот ---
             if want_bot and not bot.alive and time.time() - bot.last_start >= BOT_RESTART_GAP:
-                bot.start(token)
-
-            # --- прокси ---
-            if want_proxy and not proxy.alive and proxy.error is None:
-                try:
-                    port = int(cfg.get("proxy_port", 1443))
-                    secret = str(cfg.get("proxy_secret", ""))
-                    if proxy.start(port, secret):
-                        proxy_started_at = time.time()
-                        write_proxy_status("starting")
-                except Exception:
-                    proxy.error = "Прокси не запустился, подробности в журнале"
-                    log(traceback.format_exc())
-            if not want_proxy:
-                if proxy.alive:
-                    proxy.stop()
-                proxy.error = None  # при следующем включении пробуем заново
-
-            if want_proxy:
-                if proxy.error:
-                    # крах прокси: фиксируем ошибку и выключаем его в настройках
-                    write_proxy_status("error", msg=proxy.error)
-                    save_config({**load_config(), "proxy_enabled": False})
-                elif proxy.alive and proxy.listening:
-                    write_proxy_status("running", port=cfg.get("proxy_port"))
-                elif proxy.alive and time.time() - proxy_started_at > 20:
-                    write_proxy_status("starting", msg="жду открытия порта…")
-                elif not proxy.alive:
-                    # поток завершился без ошибки (неожиданно) — перезапустим
-                    proxy.error = None
-                    proxy.thread = None
+                if want_vpn and not vpn.alive and not vpn.error:
+                    write_status("starting", msg="жду VPN…")
+                else:
+                    bot.start(
+                        token,
+                        os.path.join(data_dir(), "notes.db"),
+                        desired_proxy,
+                    )
 
             time.sleep(LOOP_PERIOD)
     finally:
-        if proxy.alive:
-            proxy.stop()
+        if bot.alive:
+            bot.stop()
+        if vpn.alive:
+            vpn.stop()
         log("— Сервис остановлен —")
         if wakelock:
             try:

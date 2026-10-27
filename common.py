@@ -1,7 +1,8 @@
 """Общие функции для интерфейса (main.py) и фонового сервиса (service.py).
 
 Интерфейс и сервис работают в РАЗНЫХ процессах и общаются через файлы
-в приватной папке приложения: config.json, status.json, bot.log.
+в приватной папке приложения: config.json, status.json, vpn_status.json,
+vpn_cache.json, bot.log.
 """
 import json
 import os
@@ -14,10 +15,6 @@ def data_dir() -> str:
         d = os.path.join(os.path.expanduser("~"), ".tgnotesbot")  # на ПК — для тестов
     os.makedirs(d, exist_ok=True)
     return d
-
-
-def file_path(name: str) -> str:
-    return _path(name)
 
 
 def _path(name: str) -> str:
@@ -40,8 +37,7 @@ def _read_json(name: str) -> dict:
         return {}
 
 
-# --- настройки: {"token": "...", "enabled": true/false,
-#                  "proxy_enabled": true/false, "proxy_port": 1443, "proxy_secret": "32 hex"} ---
+# --- настройки ---
 def load_config() -> dict:
     return _read_json("config.json")
 
@@ -50,59 +46,7 @@ def save_config(cfg: dict) -> None:
     _write_json("config.json", cfg)
 
 
-# --- локальный MTProto-прокси для Telegram ---
-PROXY_HOST = "127.0.0.1"
-PROXY_DEFAULT_PORT = 1443
-
-
-def ensure_proxy_config() -> dict:
-    """Гарантирует, что в настройках есть порт и секрет прокси (создаёт при первом запуске)."""
-    cfg = load_config()
-    changed = False
-    secret = str(cfg.get("proxy_secret", ""))
-    try:
-        bytes.fromhex(secret)
-        valid = len(secret) == 32
-    except ValueError:
-        valid = False
-    if not valid:
-        cfg["proxy_secret"] = os.urandom(16).hex()
-        changed = True
-    try:
-        port = int(cfg.get("proxy_port", 0))
-    except (TypeError, ValueError):
-        port = 0
-    if not 1024 <= port <= 65535:
-        cfg["proxy_port"] = PROXY_DEFAULT_PORT
-        changed = True
-    if changed:
-        save_config(cfg)
-    return cfg
-
-
-def proxy_link(cfg: dict) -> str:
-    """Ссылка для Telegram: tg://proxy?... (секрет с префиксом dd)."""
-    return (f"tg://proxy?server={PROXY_HOST}&port={cfg['proxy_port']}"
-            f"&secret=dd{cfg['proxy_secret']}")
-
-
-# --- статус прокси: {"state": "running|starting|error", "msg": "...", "ts": ...} ---
-def write_proxy_status(state: str, **extra) -> None:
-    _write_json("proxy_status.json", {"state": state, "ts": time.time(), **extra})
-
-
-def read_proxy_status() -> dict:
-    return _read_json("proxy_status.json")
-
-
-def clear_proxy_status() -> None:
-    try:
-        os.remove(_path("proxy_status.json"))
-    except OSError:
-        pass
-
-
-# --- статус сервиса: {"state": "running|starting|error", "bot": "...", "msg": "...", "ts": ...} ---
+# --- статус сервиса (бота) ---
 def write_status(state: str, **extra) -> None:
     _write_json("status.json", {"state": state, "ts": time.time(), **extra})
 
@@ -116,6 +60,34 @@ def clear_status() -> None:
         os.remove(_path("status.json"))
     except OSError:
         pass
+
+
+# --- статус VPN ---
+def write_vpn_status(state: str, **extra) -> None:
+    _write_json("vpn_status.json", {"state": state, "ts": time.time(), **extra})
+
+
+def read_vpn_status() -> dict:
+    return _read_json("vpn_status.json")
+
+
+def clear_vpn_status() -> None:
+    try:
+        os.remove(_path("vpn_status.json"))
+    except OSError:
+        pass
+
+
+# --- кеш узлов из подписок ---
+VPN_CACHE_NAME = "vpn_cache.json"
+
+
+def load_vpn_cache() -> dict:
+    return _read_json(VPN_CACHE_NAME)
+
+
+def save_vpn_cache(cache: dict) -> None:
+    _write_json(VPN_CACHE_NAME, cache)
 
 
 # --- журнал ---

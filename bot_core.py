@@ -1,15 +1,13 @@
 """Логика Telegram-бота для заметок.
 
 Работает на чистой стандартной библиотеке (urllib + sqlite3) — без внешних
-зависимостей, кроме certifi (корневые сертификаты для HTTPS на Android).
-Получает сообщения через long polling (getUpdates).
+зависимостей, кроме certifi. Получает сообщения через long polling (getUpdates).
 
 Доступ по коду: пока не введён код дня, бот ничего не принимает.
 Код:  G = 2 * (d + m + y)
-  d — число месяца, m — номер месяца, y — год.
 После ввода кода открывается сессия. По кнопке «Закрыть» (или автоматически,
 если от пользователя не было сообщений 15 минут) все сообщения чата стираются.
-Сами заметки в базе при этом остаются.
+Сами заметки в базе при этом остаются. Поддерживает текст и картинки.
 """
 import datetime
 import json
@@ -18,9 +16,9 @@ import sqlite3
 import ssl
 import time
 import urllib.error
-import urllib.request
 
-API_URL = "https://api.telegram.org/bot{token}/{method}"
+import tgnet
+
 LIST_LIMIT = 20
 PREVIEW_LEN = 150
 
@@ -39,13 +37,13 @@ REMOVE_KB = {"remove_keyboard": True}
 
 HELP_TEXT = (
     "📝 Я бот для заметок.\n\n"
-    "Просто отправь мне любое сообщение — я сохраню его как заметку.\n\n"
+    "Просто отправь мне любой текст или картинку — я сохраню.\n\n"
     "Команды:\n"
     "/add <текст> — добавить заметку\n"
     "/list — последние заметки\n"
     "/view <id> — показать заметку целиком\n"
     "/search <слово> — поиск по заметкам\n"
-    "/edit <id> <новый текст> — изменить заметку\n"
+    "/edit <id> <новый текст> — изменить текст заметки\n"
     "/delete <id> — удалить заметку\n"
     "/close — закрыть сессию и стереть переписку\n"
     "/help — эта справка"
@@ -73,7 +71,6 @@ class Fatal(Exception):
 def make_ssl_context():
     try:
         import certifi
-
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         return ssl.create_default_context()
@@ -86,22 +83,42 @@ def preview(text: str) -> str:
 
 class NotesBot:
     def __init__(self, token, db_path, log, should_stop=lambda: False,
-                 on_status=lambda state, **extra: None):
+                 on_status=lambda state, **extra: None, proxy=None):
         self.token = token
+        if proxy is None:  # не передали явно — берём из config.json (поле "proxy")
+            try:
+                from common import load_config
+                proxy = load_config().get("proxy", "")
+            except Exception:
+                proxy = ""
+        try:
+            self.api_base, self.proxy = tgnet.parse_network(proxy)
+        except ValueError as e:
+            raise Fatal(f"Неверная настройка прокси: {e}")
+        self._hinted = False
         self._log = log
         self.should_stop = should_stop
         self.on_status = on_status
         self.ctx = make_ssl_context()
         self.fails = {}  # user_id -> [неверных попыток, заблокирован до]
         self.db = sqlite3.connect(db_path)
+        
+        # Время по умолчанию UTC+7, добавлена колонка media_id для картинок
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS notes (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    user_id INTEGER NOT NULL,
                    text TEXT NOT NULL,
-                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                   media_id TEXT,
+                   created_at TEXT NOT NULL DEFAULT (datetime('now', '+7 hours'))
                )"""
         )
+        # Миграция для уже существующей старой базы
+        try:
+            self.db.execute("ALTER TABLE notes ADD COLUMN media_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # открытые сессии (хранятся в БД, чтобы пережить перезапуск сервиса)
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS sessions (
@@ -127,20 +144,14 @@ class NotesBot:
     # ---------- Telegram API ----------
     def api(self, method, _timeout=15, **params):
         params = {k: v for k, v in params.items() if v is not None}
-        req = urllib.request.Request(
-            API_URL.format(token=self.token, method=method),
-            data=json.dumps(params).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+        status, body = tgnet.post_json(
+            self.api_base, f"/bot{self.token}/{method}", params,
+            timeout=_timeout, proxy=self.proxy, ctx=self.ctx,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=_timeout, context=self.ctx) as r:
-                body = r.read()
-        except urllib.error.HTTPError as e:  # у Telegram в теле ошибки лежит JSON
-            body = e.read()
         try:
             data = json.loads(body)
         except ValueError:
-            raise RuntimeError("Некорректный ответ сервера Telegram")
+            raise OSError(f"ответ не похож на ответ Telegram (HTTP {status})")
         if not data.get("ok"):
             raise ApiError(
                 data.get("error_code"),
@@ -154,6 +165,21 @@ class NotesBot:
         if track and isinstance(res, dict) and "message_id" in res:
             self.track(chat_id, res["message_id"])
         return res
+
+    def send_note(self, chat_id, note_id, text, media_id, created):
+        header = f"#{note_id} · {created[:16]}\n\n"
+        full_text = header + text
+        if media_id:
+            # Отправляем картинку (file_id), текст идёт как подпись (до 1024 символов)
+            try:
+                self.api("sendPhoto", chat_id=chat_id, photo=media_id, caption=full_text[:1024])
+                if len(full_text) > 1024:
+                    self.send(chat_id, full_text[1024:])
+            except Exception:
+                # Если файл устарел/удалён, отправляем хотя бы текст
+                self.send(chat_id, full_text)
+        else:
+            self.send(chat_id, full_text)
 
     # ---------- сессии и стирание переписки ----------
     def track(self, chat_id, message_id):
@@ -170,7 +196,6 @@ class NotesBot:
         return bool(row) and time.time() - row[0] < SESSION_TTL
 
     def touch(self, chat_id):
-        """Отмечаем активность пользователя: таймер 15 минут начинается заново."""
         self.db.execute(
             "UPDATE sessions SET opened_at = ? WHERE chat_id = ?", (time.time(), chat_id)
         )
@@ -189,7 +214,7 @@ class NotesBot:
             try:
                 self.api("deleteMessages", chat_id=chat_id, message_ids=chunk)
             except ApiError:
-                for mid in chunk:  # запасной путь: по одному, ошибки игнорируем
+                for mid in chunk:
                     try:
                         self.api("deleteMessage", chat_id=chat_id, message_id=mid)
                     except ApiError:
@@ -201,15 +226,11 @@ class NotesBot:
             "SELECT message_id FROM chat_msgs WHERE chat_id = ? ORDER BY message_id",
             (chat_id,),
         )]
-        self._delete_messages(chat_id, ids)  # при сетевой ошибке — исключение, повторим позже
+        self._delete_messages(chat_id, ids)
         self.db.execute("DELETE FROM chat_msgs WHERE chat_id = ?", (chat_id,))
         self.db.execute("DELETE FROM sessions WHERE chat_id = ?", (chat_id,))
         self.db.commit()
-        try:  # итоговое сообщение не отслеживаем — оно остаётся в чате
-            self.send(chat_id, f"🔒 {reason}\nЧтобы открыть бота, отправь код доступа.",
-                      REMOVE_KB, track=False)
-        except Exception as e:
-            self.log(f"Не удалось отправить итог закрытия: {e}")
+        # Итоговое сообщение убрано
 
     def expire_sessions(self):
         """Закрывает просроченные сессии и чистит старые записи об id сообщений."""
@@ -219,7 +240,6 @@ class NotesBot:
         ).fetchall()
         for (chat_id,) in rows:
             self.close_session(chat_id, "15 минут без сообщений — сессия закрыта, переписка стёрта.")
-        # сообщения старше ~48 ч Telegram всё равно не даст удалить
         self.db.execute("DELETE FROM chat_msgs WHERE ts < ?", (time.time() - MSG_KEEP,))
         self.db.commit()
 
@@ -247,23 +267,26 @@ class NotesBot:
         self.send(chat, "🔒 Бот закрыт. Отправь код доступа.")
 
     # ---------- заметки (БД) ----------
-    def add_note(self, uid, text):
-        cur = self.db.execute("INSERT INTO notes (user_id, text) VALUES (?, ?)", (uid, text))
+    def add_note(self, uid, text, media_id=None):
+        cur = self.db.execute(
+            "INSERT INTO notes (user_id, text, media_id, created_at) VALUES (?, ?, ?, datetime('now', '+7 hours'))",
+            (uid, text, media_id)
+        )
         self.db.commit()
         return cur.lastrowid
 
     def get_notes(self, uid, query=None):
         rows = self.db.execute(
-            "SELECT id, text, created_at FROM notes WHERE user_id = ? ORDER BY id DESC", (uid,)
+            "SELECT id, text, media_id, created_at FROM notes WHERE user_id = ? ORDER BY id DESC", (uid,)
         ).fetchall()
-        if query:  # поиск в Python: SQLite не умеет lower() для кириллицы
+        if query:
             q = query.lower()
             rows = [r for r in rows if q in r[1].lower()]
         return rows[:LIST_LIMIT]
 
     def get_note(self, uid, note_id):
         return self.db.execute(
-            "SELECT id, text, created_at FROM notes WHERE id = ? AND user_id = ?", (note_id, uid)
+            "SELECT id, text, media_id, created_at FROM notes WHERE id = ? AND user_id = ?", (note_id, uid)
         ).fetchone()
 
     def update_note(self, uid, note_id, text):
@@ -282,8 +305,9 @@ class NotesBot:
     @staticmethod
     def render_list(notes, title):
         lines, buttons = [title, ""], []
-        for note_id, text, created in notes:
-            lines.append(f"#{note_id} · {created[:16]}\n{preview(text)}\n")
+        for note_id, text, media_id, created in notes:
+            emoji = "📷 " if media_id else ""
+            lines.append(f"{emoji}#{note_id} · {created[:16]}\n{preview(text)}\n")
             buttons.append({"text": f"🗑 #{note_id}", "callback_data": f"del:{note_id}"})
         rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
         return "\n".join(lines), {"inline_keyboard": rows}
@@ -293,24 +317,41 @@ class NotesBot:
         if "callback_query" in update:
             return self.on_callback(update["callback_query"])
         msg = update.get("message")
-        if not msg or not msg.get("text"):
+        if not msg:
             return
+        
         chat, uid = msg["chat"]["id"], msg["from"]["id"]
-        text = msg["text"].strip()
         self.track(chat, msg["message_id"])
         self.expire_sessions()
 
+        text = msg.get("text", "").strip() or msg.get("caption", "").strip()
+        
+        # Ищем картинку в сообщении
+        media_id = None
+        if "photo" in msg:
+            media_id = msg["photo"][-1]["file_id"]
+            if not text: text = "📷 Фотография"
+        elif "document" in msg and msg["document"].get("mime_type", "").startswith("image/"):
+            media_id = msg["document"]["file_id"]
+            if not text: text = "🖼 Изображение"
+        
+        if not text and not media_id:
+            return
+
         if not self.is_open(chat):
+            if media_id:
+                return self.send(chat, "🔒 Отправь код доступа текстом.")
             return self.locked(chat, uid, text)
 
         self.touch(chat)
         if text == CLOSE_BTN or text.split("@")[0].lower() == "/close":
             return self.close_session(chat, "Сессия закрыта, переписка стёрта.")
-        if text.startswith("/"):
+            
+        if text.startswith("/") and not media_id:
             cmd, _, arg = text.partition(" ")
             self.command(chat, uid, cmd[1:].split("@")[0].lower(), arg.strip())
         else:
-            note_id = self.add_note(uid, text)
+            note_id = self.add_note(uid, text, media_id)
             self.send(chat, f"✅ Заметка #{note_id} сохранена.")
 
     def command(self, chat, uid, cmd, arg):
@@ -340,7 +381,7 @@ class NotesBot:
             note = self.get_note(uid, int(arg))
             if not note:
                 return self.send(chat, "Заметка не найдена.")
-            self.send(chat, f"#{note[0]} · {note[2][:16]}\n\n{note[1]}")
+            self.send_note(chat, *note)
         elif cmd == "edit":
             parts = arg.split(None, 1)
             if len(parts) < 2 or not parts[0].isdigit():
@@ -359,7 +400,7 @@ class NotesBot:
         data = cq.get("data", "")
         uid = cq["from"]["id"]
         message = cq.get("message")
-        chat = message["chat"]["id"] if message else uid  # в личке id чата = id пользователя
+        chat = message["chat"]["id"] if message else uid
         self.expire_sessions()
         if not self.is_open(chat):
             return self.api(
@@ -393,14 +434,15 @@ class NotesBot:
     # ---------- основной цикл ----------
     def run(self):
         username, offset = None, None
+        self.log("Сеть: " + tgnet.describe(self.api_base, self.proxy))
         while not self.should_stop():
             try:
                 if username is None:
                     username = self.api("getMe")["username"]
-                    self.api("deleteWebhook")  # иначе getUpdates вернёт ошибку 409
+                    self.api("deleteWebhook")
                     self.log(f"Подключён как @{username}")
                 self.on_status("running", bot=username)
-                self.expire_sessions()  # автозакрытие по таймеру (точность ≈ 25 с)
+                self.expire_sessions()
                 updates = self.api(
                     "getUpdates", _timeout=40, offset=offset, timeout=25,
                     allowed_updates=["message", "callback_query"],
@@ -409,14 +451,14 @@ class NotesBot:
                     offset = upd["update_id"] + 1
                     try:
                         self.handle(upd)
-                    except Exception as e:  # одно кривое сообщение не должно ронять бота
+                    except Exception as e:
                         self.log(f"Ошибка обработки сообщения: {e}")
             except ApiError as e:
                 if e.code == 401:
                     raise Fatal("Неверный токен бота (Telegram ответил 401).")
                 if e.code == 409:
-                    self.log("Конфликт: этот бот уже запущен где-то ещё (ПК, сервер?). Жду…")
-                    self.on_status("running", bot=username, msg="конфликт: бот запущен ещё где-то")
+                    self.log("Конфликт: этот бот уже запущен где-то ещё. Жду…")
+                    self.on_status("running", bot=username, msg="конфликт")
                     time.sleep(10)
                 elif e.code == 429:
                     time.sleep((e.retry_after or 5) + 1)
@@ -425,7 +467,11 @@ class NotesBot:
                     time.sleep(5)
             except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
                 if isinstance(e, socket.timeout):
-                    continue  # обычный таймаут long polling
+                    continue
                 self.log(f"Нет связи с Telegram: {e}. Повтор через 5 с…")
+                if not self._hinted and self.proxy is None and self.api_base == tgnet.DEFAULT_BASE:
+                    self._hinted = True
+                    self.log("Подсказка: если Telegram у тебя заблокирован, укажи прокси "
+                             "или адрес API в настройках приложения.")
                 self.on_status("running", bot=username, msg="нет сети, пробую снова…")
                 time.sleep(5)
