@@ -30,21 +30,22 @@ jobs:
             ~/.buildozer
           key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
 
-      # --- НОВЫЙ ШАГ ---
       - name: Download Xray for Android
         run: |
-          # Скачиваем последнюю версию Xray для Android (arm64-v8a)
-          # Флаг -L нужен для редиректа, -q (тихий режим), -O (сохранить как)
-          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip -O xray.zip
+          # 64-битная версия (arm64-v8a)
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip -O xray64.zip
+          unzip -o xray64.zip xray
+          mv xray xray_arm64
+          chmod +x xray_arm64
           
-          # Распаковываем только сам бинарник xray
-          unzip -o xray.zip xray
+          # 32-битная версия (armeabi-v7a)
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm32-v7a.zip -O xray32.zip
+          unzip -o xray32.zip xray
+          mv xray xray_arm32
+          chmod +x xray_arm32
           
-          # Даём права на исполнение
-          chmod +x xray
-          
-          # Проверяем, что файл на месте и весит столько, сколько нужно
-          ls -lh xray
+          # Проверяем, что оба файла на месте
+          ls -lh xray_arm64 xray_arm32
 
       - name: Build
         run: |
