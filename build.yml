@@ -8,13 +8,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -22,12 +20,40 @@ jobs:
             pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
             cmake libffi-dev libssl-dev
           pip install --upgrade pip buildozer "cython<3" virtualenv
+
       - uses: actions/cache@v4
         with:
-          path: .buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
+
+      - name: Download Xray for Android
+        run: |
+          # 64-битная версия (arm64-v8a)
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip -O xray64.zip
+          unzip -o xray64.zip xray
+          mv xray xray_arm64
+          chmod +x xray_arm64
+          
+          # 32-битная версия (armeabi-v7a) — исправлено имя архива
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm32-v7a.zip -O xray32.zip
+          unzip -o xray32.zip xray
+          mv xray xray_arm32
+          chmod +x xray_arm32
+          
+          # Проверяем, что оба файла на месте
+          ls -lh xray_arm64 xray_arm32
+
       - name: Build
-        run: buildozer -v android debug
+        run: |
+          export JAVA_HOME="$JAVA_HOME_11_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          mkdir -p ~/.gradle
+          echo "org.gradle.java.home=$JAVA_HOME_17_X64" >> ~/.gradle/gradle.properties
+          java -version
+          buildozer -v android debug
+
       - uses: actions/upload-artifact@v4
         with:
           name: notesbot-apk
