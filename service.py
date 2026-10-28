@@ -111,14 +111,10 @@ class BotRunner:
         self.last_start = time.time()
         self._stop.clear()
 
-        # NotesBot читает config["proxy"] в __init__, если не передан явно.
-        # Записываем актуальный прокси, чтобы бот гарантированно его увидел.
-        cfg = load_config()
-        cfg["proxy"] = self.proxy_used
-        save_config(cfg)
-
+        # Прокси передаём боту напрямую (не через config.json): так нет гонки
+        # с интерфейсом и пароль SOCKS не лежит на диске.
         self.thread = threading.Thread(
-            target=self._work, args=(token, db_path, self._stop),
+            target=self._work, args=(token, db_path, self._stop, self.proxy_used),
             daemon=True, name="bot")
         self.thread.start()
 
@@ -129,7 +125,7 @@ class BotRunner:
             self.thread = None
 
     @staticmethod
-    def _work(token, db_path, stop_ev):
+    def _work(token, db_path, stop_ev, proxy_url):
         def should_stop():
             return stop_ev.is_set() or not load_config().get("enabled")
 
@@ -138,7 +134,8 @@ class BotRunner:
         try:
             bot = NotesBot(
                 token, db_path, log,
-                should_stop=should_stop, on_status=write_status)
+                should_stop=should_stop, on_status=write_status,
+                proxy=proxy_url)
         except Fatal as e:
             log(f"Ошибка: {e}")
             write_status("error", msg=str(e))

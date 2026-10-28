@@ -473,5 +473,10 @@ class NotesBot:
                     self._hinted = True
                     self.log("Подсказка: если Telegram у тебя заблокирован, укажи прокси "
                              "или адрес API в настройках приложения.")
+                if self.proxy is not None and not self._hinted:
+                    self._hinted = True
+                    self.log("Подсказка: связь идёт через VPN-прокси, но Telegram не открывается — "
+                             "VPN-узел не пропускает трафик. Смотри строки [vpn] и [xray] выше, "
+                             "попробуй другой ключ.")
                 self.on_status("running", bot=username, msg="нет сети, пробую снова…")
                 time.sleep(5)
