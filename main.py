@@ -25,6 +25,8 @@ from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.uix.popup import Popup
 from kivy.utils import platform
 
 from common import (
@@ -406,6 +408,7 @@ class BotLauncherApp(App):
         self.proc = None
         self.requested_at = 0.0
         self.vpn_requested_at = 0.0
+        self._battery_prompt_shown = False
         return Root()
 
     def on_start(self):
@@ -418,6 +421,8 @@ class BotLauncherApp(App):
             self.vpn_requested_at = time.time()
         if platform == "android":
             self._request_notification_permission()
+            if cfg.get("enabled") or cfg.get("vpn_enabled"):
+                Clock.schedule_once(self._maybe_prompt_battery_optimization, 0.8)
         Clock.schedule_interval(self.tick, 1.5)
         self.tick()
 
@@ -442,6 +447,7 @@ class BotLauncherApp(App):
         self.requested_at = time.time()
         self._launch_stop()
         Clock.schedule_once(lambda dt: self._launch_start(), 0.7)
+        Clock.schedule_once(self._maybe_prompt_battery_optimization, 1.0)
         self.tick()
 
     def stop_bot(self):
@@ -475,6 +481,7 @@ class BotLauncherApp(App):
         self.vpn_requested_at = time.time()
         self._launch_stop()
         Clock.schedule_once(lambda dt: self._launch_start(), 0.7)
+        Clock.schedule_once(self._maybe_prompt_battery_optimization, 1.0)
         self.tick()
 
     def stop_vpn(self):
@@ -486,19 +493,121 @@ class BotLauncherApp(App):
         self.tick()
 
     # ---------- прочее ----------
-    def open_battery_settings(self):
+    def _is_ignoring_battery_optimizations(self):
+        """Проверяет, разрешил ли пользователь работу вне Doze/App Standby."""
+        if platform != "android":
+            return True
+        try:
+            from jnius import autoclass
+            BuildVersion = autoclass("android.os.Build$VERSION")
+            if BuildVersion.SDK_INT < 23:
+                return True
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Context = autoclass("android.content.Context")
+            power = activity.getSystemService(Context.POWER_SERVICE)
+            return bool(power.isIgnoringBatteryOptimizations(
+                activity.getPackageName()))
+        except Exception:
+            return False
+
+    def _maybe_prompt_battery_optimization(self, *_):
+        """Объясняет пользователю, зачем приложению нужен фоновый доступ."""
+        if platform != "android":
+            return
+        if self._is_ignoring_battery_optimizations() or self._battery_prompt_shown:
+            return
+        self._battery_prompt_shown = True
+
+        content = BoxLayout(
+            orientation="vertical", spacing=dp(12), padding=(dp(16), dp(12)))
+        message = Label(
+            text=(
+                "Android может останавливать Notes Bot в фоне.\n\n"
+                "Чтобы бот и VPN продолжали работать с выключенным экраном, "
+                "разреши приложению не применять оптимизацию батареи. "
+                "Это может увеличить расход заряда."
+            ),
+            color=DARK_TEXT,
+            halign="left",
+            valign="middle",
+            size_hint_y=1,
+        )
+        message.bind(size=lambda widget, size: setattr(
+            widget, "text_size", (size[0], None)))
+        content.add_widget(message)
+
+        buttons = BoxLayout(
+            orientation="horizontal", spacing=dp(10),
+            size_hint_y=None, height=dp(48))
+        allow = Button(
+            text="Разрешить",
+            background_normal="",
+            background_color=ACCENT,
+            color=(1, 1, 1, 1),
+        )
+        later = Button(
+            text="Позже",
+            background_normal="",
+            background_color=SOFT,
+            color=DARK_TEXT,
+        )
+        buttons.add_widget(allow)
+        buttons.add_widget(later)
+        content.add_widget(buttons)
+
+        popup = Popup(
+            title="Фоновая работа Notes Bot",
+            content=content,
+            size_hint=(0.92, None),
+            height=dp(285),
+            auto_dismiss=False,
+        )
+        allow.bind(on_release=lambda *_: self._on_battery_permission_accept(popup))
+        later.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+
+    def _on_battery_permission_accept(self, popup):
+        popup.dismiss()
+        self._request_battery_optimization_exemption()
+
+    def _request_battery_optimization_exemption(self):
+        """Открывает системный запрос разрешения, с fallback на список настроек."""
         if platform != "android":
             return self.flash("Эта настройка есть только на Android")
+        if self._is_ignoring_battery_optimizations():
+            return self.flash("Оптимизация батареи для Notes Bot уже отключена")
         try:
             from jnius import autoclass
             Intent = autoclass("android.content.Intent")
             Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            activity.startActivity(
-                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            self.flash("Найди Notes Bot и выбери «Не ограничивать»")
-        except Exception as e:
-            self.flash(f"Не удалось открыть настройки: {e}")
+            package_uri = Uri.parse("package:" + activity.getPackageName())
+            intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            intent.setData(package_uri)
+            activity.startActivity(intent)
+            self.flash("Подтверди разрешение в системном окне Android")
+        except Exception:
+            # Некоторые прошивки не показывают прямой запрос. Тогда пользователь
+            # сможет найти Notes Bot в стандартном списке оптимизации батареи.
+            try:
+                from jnius import autoclass
+                Intent = autoclass("android.content.Intent")
+                Settings = autoclass("android.provider.Settings")
+                activity = autoclass("org.kivy.android.PythonActivity").mActivity
+                activity.startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                self.flash("Найди Notes Bot и выбери «Не ограничивать»")
+            except Exception as e:
+                self.flash(f"Не удалось открыть настройки: {e}")
+
+    def open_battery_settings(self):
+        if platform != "android":
+            return self.flash("Эта настройка есть только на Android")
+        if self._is_ignoring_battery_optimizations():
+            return self.flash("Оптимизация батареи для Notes Bot уже отключена")
+        self._battery_prompt_shown = False
+        self._maybe_prompt_battery_optimization()
 
     # ---------- запуск/остановка сервиса ----------
     def _launch_start(self):
