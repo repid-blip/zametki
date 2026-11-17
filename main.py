@@ -409,6 +409,7 @@ class BotLauncherApp(App):
         self.requested_at = 0.0
         self.vpn_requested_at = 0.0
         self._battery_prompt_shown = False
+        self._last_auto_restart = 0.0
         return Root()
 
     def on_start(self):
@@ -423,6 +424,10 @@ class BotLauncherApp(App):
             self._request_notification_permission()
             if cfg.get("enabled") or cfg.get("vpn_enabled"):
                 Clock.schedule_once(self._maybe_prompt_battery_optimization, 0.8)
+        # Если Android убил сервис, пока приложение было закрыто, — поднимаем его
+        # снова. Повторный запуск безопасен: живой сервис просто проигнорирует его.
+        if cfg.get("enabled") or cfg.get("vpn_enabled"):
+            Clock.schedule_once(lambda dt: self._launch_start(), 1.0)
         Clock.schedule_interval(self.tick, 1.5)
         self.tick()
 
@@ -605,9 +610,27 @@ class BotLauncherApp(App):
         if platform != "android":
             return self.flash("Эта настройка есть только на Android")
         if self._is_ignoring_battery_optimizations():
-            return self.flash("Оптимизация батареи для Notes Bot уже отключена")
+            # Стандартная оптимизация уже отключена, но многие прошивки
+            # (Xiaomi, Huawei, Samsung, Oppo…) убивают фон своими способами —
+            # открываем страницу приложения, чтобы включить автозапуск
+            # и «Без ограничений» в настройках батареи.
+            return self._open_app_details()
         self._battery_prompt_shown = False
         self._maybe_prompt_battery_optimization()
+
+    def _open_app_details(self):
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.setData(Uri.parse("package:" + activity.getPackageName()))
+            activity.startActivity(intent)
+            self.flash("Включи автозапуск и «Без ограничений» для батареи")
+        except Exception as e:
+            self.flash(f"Не удалось открыть настройки: {e}")
 
     # ---------- запуск/остановка сервиса ----------
     def _launch_start(self):
@@ -720,6 +743,14 @@ class BotLauncherApp(App):
         root.vpn_button_text = "Выключить VPN" if v_active else "Включить VPN"
         root.vpn_toggle_bg = SOFT if v_active else ACCENT
         root.vpn_toggle_color = DARK_TEXT if v_active else (1, 1, 1, 1)
+
+        # --- авто-перезапуск, если сервис перестал отвечать (убит Android) ---
+        if "noresp" in (state, v_state):
+            now = time.time()
+            if now - self._last_auto_restart > 60:
+                self._last_auto_restart = now
+                self.requested_at = self.vpn_requested_at = now
+                self._launch_start()
 
         # --- журнал (автоскролл вниз, к свежим строкам) ---
         text = tail_log()

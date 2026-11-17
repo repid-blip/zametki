@@ -7,8 +7,10 @@ source.include_exts = py,png,jpg,kv,atlas,json,ttf
 version = 1.0
 orientation = portrait
 requirements = python3,kivy,certifi,pyjnius,android,sqlite3,openssl
-services = botservice:service.py:foreground
-android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,WAKE_LOCK,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+# sticky — Android перезапустит сервис, если всё же убьёт процесс;
+# foregroundServiceType — обязателен для foreground-сервисов на Android 14+
+services = botservice:service.py:foreground:sticky:foregroundServiceType=dataSync
+android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,WAKE_LOCK,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,ACCESS_WIFI_STATE,ACCESS_NETWORK_STATE
 android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a, armeabi-v7a

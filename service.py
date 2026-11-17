@@ -37,18 +37,49 @@ def _lock_path():
 
 
 def acquire_wakelock():
-    """Не даём процессору уснуть вместе с экраном (только Android)."""
+    """Не даём процессору и Wi-Fi уснуть вместе с экраном (только Android).
+
+    Возвращает список захваченных блокировок (может быть пустым).
+    """
+    locks = []
     try:
         from jnius import autoclass
 
         PythonService = autoclass("org.kivy.android.PythonService")
         Context = autoclass("android.content.Context")
-        pm = PythonService.mService.getSystemService(Context.POWER_SERVICE)
-        wl = pm.newWakeLock(1, "tgnotesbot:polling")  # PARTIAL_WAKE_LOCK
-        wl.acquire()
-        return wl
+        service = PythonService.mService
+
+        try:
+            pm = service.getSystemService(Context.POWER_SERVICE)
+            wl = pm.newWakeLock(1, "tgnotesbot:polling")  # PARTIAL_WAKE_LOCK
+            wl.setReferenceCounted(False)
+            wl.acquire()
+            locks.append(wl)
+        except Exception:
+            log("[service] не удалось взять WakeLock: " + traceback.format_exc())
+
+        try:
+            # Без WifiLock в Doze Wi-Fi засыпает, и соединение с Telegram рвётся.
+            wm = service.getApplicationContext().getSystemService(
+                Context.WIFI_SERVICE)
+            wfl = wm.createWifiLock(3, "tgnotesbot:wifi")  # WIFI_MODE_FULL_HIGH_PERF
+            wfl.setReferenceCounted(False)
+            wfl.acquire()
+            locks.append(wfl)
+        except Exception:
+            log("[service] не удалось взять WifiLock: " + traceback.format_exc())
     except Exception:
-        return None
+        pass
+    return locks
+
+
+def release_locks(locks):
+    for lk in locks or []:
+        try:
+            if lk.isHeld():
+                lk.release()
+        except Exception:
+            pass
 
 
 def stop_self():
@@ -170,7 +201,7 @@ def main():
         return
     _touch_lock()
 
-    wakelock = acquire_wakelock()
+    locks = acquire_wakelock()
     log("— Сервис запущен —")
     bot = BotRunner()
     vpn = VpnRunner(log)
@@ -229,11 +260,7 @@ def main():
         if vpn.alive:
             vpn.stop()
         log("— Сервис остановлен —")
-        if wakelock:
-            try:
-                wakelock.release()
-            except Exception:
-                pass
+        release_locks(locks)
         _remove_lock()
         stop_self()
 
